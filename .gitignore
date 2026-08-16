@@ -1,0 +1,14 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# Secrets. .env.example is committed; .env never is.
+.env
+*.pem
+*.key
+
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+*.log
