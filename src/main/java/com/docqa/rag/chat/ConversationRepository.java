@@ -92,8 +92,13 @@ public class ConversationRepository {
                                boolean refused,
                                List<RetrievedChunk> sources) {
 
+        // Both rows of a refused exchange carry refused = true. Marking only the
+        // assistant row leaves the user's question in history with no answer
+        // after it, and the model reads that as a question it was asked and
+        // ignored. `refused` therefore means "belongs to a refused exchange",
+        // and the refusal rate is counted over assistant rows.
         insertMessage(tenantId, conversationId, ConversationMessage.MessageRole.USER,
-                question, questionTokens, null, null, false);
+                question, questionTokens, null, null, refused);
 
         UUID assistantMessageId = insertMessage(tenantId, conversationId,
                 ConversationMessage.MessageRole.ASSISTANT, answer, answerTokens,

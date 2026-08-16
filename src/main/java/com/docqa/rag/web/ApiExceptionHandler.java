@@ -20,6 +20,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
@@ -121,6 +122,23 @@ public class ApiExceptionHandler {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .header(HttpHeaders.RETRY_AFTER, "30")
                 .body(detail(HttpStatus.SERVICE_UNAVAILABLE, "Ingestion queue full", e.getMessage()));
+    }
+
+    // ---- client went away --------------------------------------------------
+
+    /**
+     * The SSE client disconnected mid-stream.
+     *
+     * <p>This is normal - a user closing the tab while an answer streams - and
+     * handling it explicitly matters for two reasons. There is no connection
+     * left to write a response to, so returning a body is pointless. And
+     * without this handler it falls through to the catch-all below and logs a
+     * full stack trace at ERROR on every cancelled stream, which buries real
+     * errors in noise and makes a working feature look broken in the logs.
+     */
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleClientDisconnect(AsyncRequestNotUsableException e) {
+        log.debug("Client disconnected before the response completed: {}", e.getMessage());
     }
 
     // ---- 500 --------------------------------------------------------------
