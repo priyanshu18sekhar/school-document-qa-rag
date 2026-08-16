@@ -1,0 +1,59 @@
+# `docker compose up` starts Postgres with pgvector and the application, runs
+# the Flyway migrations, and serves the API on http://localhost:8080.
+#
+# Copy .env.example to .env first if you want real answers - without an API key
+# the service still starts, migrations still run, and uploads still return 202,
+# but ingestion and chat will report the model provider as unavailable.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: docqa-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-docqa}
+      POSTGRES_USER: ${DB_USERNAME:-docqa}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-docqa}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app waits on this. Without it, Flyway races Postgres' startup and
+      # the first boot fails on a clean clone - which is exactly the "runs from
+      # a clean clone" requirement.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-docqa} -d ${DB_NAME:-docqa}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  app:
+    build:
+      context: .
+    container_name: docqa-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-docqa}
+      DB_USERNAME: ${DB_USERNAME:-docqa}
+      DB_PASSWORD: ${DB_PASSWORD:-docqa}
+
+      # Provider selection is config, not code. See .env.example.
+      RAG_CHAT_PROVIDER: ${RAG_CHAT_PROVIDER:-openai}
+      RAG_EMBEDDING_PROVIDER: ${RAG_EMBEDDING_PROVIDER:-openai}
+      RAG_CHAT_MODEL: ${RAG_CHAT_MODEL:-gpt-4.1-mini}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-text-embedding-3-small}
+      RAG_EMBEDDING_DIMENSIONS: ${RAG_EMBEDDING_DIMENSIONS:-1536}
+      RAG_SIMILARITY_THRESHOLD: ${RAG_SIMILARITY_THRESHOLD:-0.62}
+
+      # Read from the environment / .env. Never baked into the image.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

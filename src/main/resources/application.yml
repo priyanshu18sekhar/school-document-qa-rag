@@ -1,0 +1,207 @@
+spring:
+  application:
+    name: document-qa-rag
+
+  threads:
+    virtual:
+      enabled: true          # NFR-3: HTTP request threads are virtual, so a slow
+                             # model call parks a virtual thread, not a platform one.
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/docqa}
+    username: ${DB_USERNAME:docqa}
+    password: ${DB_PASSWORD:docqa}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:16}
+      connection-timeout: 5000
+      pool-name: docqa-pool
+
+  jpa:
+    # No JPA on the classpath at all - this block exists only so that the
+    # "no ddl-auto=update" requirement is unambiguous to a reader.
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    placeholders:
+      # The pgvector column type needs a literal dimension. Keep it in exactly
+      # one place, driven by the configured embedding model.
+      embeddingDimensions: ${rag.embedding.dimensions}
+
+  servlet:
+    multipart:
+      max-file-size: ${RAG_MAX_FILE_SIZE:20MB}
+      max-request-size: ${RAG_MAX_REQUEST_SIZE:21MB}
+      # Stream to disk almost immediately rather than buffering 20MB per
+      # concurrent upload in heap.
+      file-size-threshold: 256KB
+
+  ai:
+    model:
+      # ==== The whole provider swap. Config, not code. ====
+      # chat:      openai | anthropic | ollama | none
+      # embedding: openai | ollama    | none
+      chat: ${RAG_CHAT_PROVIDER:openai}
+      embedding: ${RAG_EMBEDDING_PROVIDER:openai}
+
+    retry:
+      # Spring AI's own retry is disabled: retry and circuit breaking are done
+      # once, in ResilientChatModel/ResilientEmbeddingModel, so that there is a
+      # single place where backoff policy lives and a single set of metrics.
+      # Two nested retry layers turn one 30s outage into a 9x request amplifier.
+      max-attempts: 1
+
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${RAG_CHAT_MODEL:gpt-4.1-mini}
+          temperature: 0.0        # Grounded extraction, not creative writing.
+      embedding:
+        options:
+          model: ${RAG_EMBEDDING_MODEL:text-embedding-3-small}
+
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      chat:
+        options:
+          model: ${RAG_CHAT_MODEL:claude-sonnet-4-5}
+          temperature: 0.0
+
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      init:
+        pull-model-strategy: never
+      chat:
+        options:
+          model: ${RAG_CHAT_MODEL:llama3.1}
+          temperature: 0.0
+      embedding:
+        options:
+          model: ${RAG_EMBEDDING_MODEL:nomic-embed-text}
+
+server:
+  port: ${SERVER_PORT:8080}
+  tomcat:
+    # Let Tomcat drain a slightly-oversized body so the client gets a clean 413
+    # response instead of a connection reset. Beyond this, the connection is
+    # dropped - which is the correct behaviour for a genuinely abusive upload.
+    max-swallow-size: 25MB
+  error:
+    include-stacktrace: never       # NFR: no stack traces to clients, ever.
+    include-message: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    # The model provider health indicator is registered by ModelHealthConfig.
+    defaults:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    com.docqa.rag: ${LOG_LEVEL:INFO}
+    org.flywaydb: INFO
+  pattern:
+    # Correlation ID and tenant ride along on every line, including lines
+    # emitted from the async ingestion executor.
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{correlationId:-────────}] [%X{tenantId:-─}] %logger{36} - %msg%n"
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+
+# ===========================================================================
+# Application configuration. Every number here is defended in the README.
+# ===========================================================================
+rag:
+  tenant:
+    header: X-Tenant-Id
+    # No default tenant. A request without the header is a 400, not a silent
+    # fallback to "default" - a fallback tenant is how cross-tenant leaks start.
+    max-length: 64
+
+  ingestion:
+    # Bounded queue, bounded pool. When both are full the upload is rejected
+    # with 503 rather than queued forever or OOMing the heap.
+    worker-threads: ${RAG_INGEST_THREADS:4}
+    queue-capacity: ${RAG_INGEST_QUEUE:100}
+    shutdown-grace-seconds: 30
+
+  chunking:
+    # See README "Chunking strategy". Sizes are in real BPE tokens, not chars.
+    max-tokens: ${RAG_CHUNK_MAX_TOKENS:450}
+    overlap-tokens: ${RAG_CHUNK_OVERLAP_TOKENS:80}
+    # Chunks below this are merged into their neighbour: a 6-token fragment
+    # embeds to noise and pollutes retrieval.
+    min-tokens: ${RAG_CHUNK_MIN_TOKENS:24}
+
+  embedding:
+    # Must match the model in spring.ai.*.embedding.options.model.
+    # text-embedding-3-small = 1536, nomic-embed-text = 768.
+    dimensions: ${RAG_EMBEDDING_DIMENSIONS:1536}
+    # One HTTP call per batch, not one per chunk (FR-2).
+    batch-size: ${RAG_EMBEDDING_BATCH_SIZE:64}
+    # OpenAI rejects a batch over 300k tokens; stay well under it.
+    max-batch-tokens: ${RAG_EMBEDDING_MAX_BATCH_TOKENS:200000}
+
+  retrieval:
+    top-k: ${RAG_TOP_K:5}
+    # See README "Similarity threshold" for how this number was chosen.
+    similarity-threshold: ${RAG_SIMILARITY_THRESHOLD:0.62}
+    # Rows pulled from the index before the threshold cut.
+    candidate-multiplier: ${RAG_CANDIDATE_MULTIPLIER:4}
+    # pgvector HNSW search breadth. Higher = better recall under a selective
+    # tenant filter, at the cost of latency. See README "Filtered vector search".
+    hnsw-ef-search: ${RAG_HNSW_EF_SEARCH:100}
+
+  chat:
+    max-history-turns: ${RAG_HISTORY_TURNS:6}
+    # FR-7 asks for a token budget, not just a turn count. Whichever binds
+    # first wins.
+    history-token-budget: ${RAG_HISTORY_TOKEN_BUDGET:1200}
+    context-token-budget: ${RAG_CONTEXT_TOKEN_BUDGET:3000}
+    max-output-tokens: ${RAG_MAX_OUTPUT_TOKENS:800}
+    model-timeout-seconds: ${RAG_MODEL_TIMEOUT_SECONDS:60}
+    refusal-message: >-
+      I could not find that in the available documents. Please rephrase the
+      question, or check that the relevant document has been uploaded.
+
+  resilience:
+    retry:
+      max-attempts: 3
+      initial-backoff-ms: 500
+      backoff-multiplier: 2.0
+      max-backoff-ms: 8000
+    circuit-breaker:
+      failure-rate-threshold: 50
+      slow-call-duration-seconds: 20
+      slow-call-rate-threshold: 80
+      sliding-window-size: 20
+      minimum-number-of-calls: 8
+      wait-duration-in-open-state-seconds: 30
+      permitted-calls-in-half-open-state: 3
+
+  cost:
+    # USD per 1M tokens. Used for the estimated-cost metric only; wrong numbers
+    # here cost you nothing but a wrong dashboard, so they are config not code.
+    chat-input-per-million: ${RAG_COST_CHAT_IN:0.40}
+    chat-output-per-million: ${RAG_COST_CHAT_OUT:1.60}
+    embedding-per-million: ${RAG_COST_EMBEDDING:0.02}
