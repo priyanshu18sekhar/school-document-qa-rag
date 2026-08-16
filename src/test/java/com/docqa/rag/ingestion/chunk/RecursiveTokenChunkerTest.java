@@ -34,7 +34,7 @@ class RecursiveTokenChunkerTest {
                 new RagProperties.Chunking(maxTokens, overlapTokens, minTokens),
                 new RagProperties.Embedding(1536, 64, 200_000),
                 new RagProperties.Retrieval(5, 0.62, 4, 100),
-                new RagProperties.Chat(6, 1200, 3000, 800, 60, "not found"),
+                new RagProperties.Chat(6, 1200, 3000, 800, 60, true, "not found"),
                 new RagProperties.Resilience(
                         new RagProperties.Resilience.Retry(3, 500, 2.0, 8000),
                         new RagProperties.Resilience.CircuitBreaker(50, 20, 80, 20, 8, 30, 3)),

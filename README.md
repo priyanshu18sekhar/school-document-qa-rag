@@ -105,6 +105,7 @@ QUERY
 
   POST /api/v1/chat
       │
+      ├─ load history, rewrite a follow-up into a standalone query   ← see below
       ├─ embed the question                                   (1 provider call)
       ├─ SQL: HNSW ANN ▸ tenant ▸ category ▸ threshold ▸ top-K  ── all in Postgres
       │
@@ -427,6 +428,44 @@ Everything else that can go wrong maps to a status rather than a stack trace: 41
 type, 413 too large, 400 no tenant header, 404 unknown or other-tenant id, 503 with
 `Retry-After` for provider failure and for a saturated ingestion queue. Responses are RFC 9457
 `application/problem+json` and every one carries the correlation id.
+
+---
+
+## Follow-up questions
+
+FR-7 asks that follow-ups like *"what about for class 9?"* work. Putting conversation
+history in the prompt is necessary but **not sufficient**, and the reason is a sequencing
+problem that is easy to miss: **retrieval runs before the model does.**
+
+I found this by running the service, not by reading the code:
+
+```
+Q: "What is the tuition fee for Class 9 in term 2?"   → ₹19,500 [1]      ✅
+Q: "And for Class 11 Science?"                        → REFUSED          ❌  sim 0.7492
+```
+
+The second question was refused with the answer sitting in the corpus and the history
+sitting in the prompt, unread — because the string that got embedded was the bare
+follow-up, eight words mentioning neither fees nor terms. It scored 0.7492, below the
+threshold, and the refusal fired before the model was ever called.
+
+`QueryRewriter` resolves the follow-up against the last two turns before embedding:
+
+```
+'And for Class 11 Science?'  →  'Tuition fee for Class 11 Science'   sim 0.8466  → ₹24,000 ✅
+'What about term 3?'         →  'Tuition fees for Class 9 and Class 11 Science in Term 3' ✅
+```
+
+Three things about the design:
+
+- **It costs one extra small model call, on turns that have history only.** A first question
+  short-circuits with no call at all.
+- **If the rewrite fails, we fall back to the user's original question** rather than failing
+  the request. Degraded retrieval beats no answer, and the refusal path still protects
+  correctness if the degraded retrieval finds nothing.
+- **The rewrite is used for retrieval only.** The prompt, the stored history and the API
+  response all carry the user's own wording — rewriting what somebody asked and then showing
+  it back to them is disorienting.
 
 ---
 

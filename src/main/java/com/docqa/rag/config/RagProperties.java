@@ -90,6 +90,7 @@ public record RagProperties(
             @Min(100) int contextTokenBudget,
             @Min(16) int maxOutputTokens,
             @Min(1) int modelTimeoutSeconds,
+            boolean queryRewritingEnabled,
             @NotBlank String refusalMessage
     ) {}
 

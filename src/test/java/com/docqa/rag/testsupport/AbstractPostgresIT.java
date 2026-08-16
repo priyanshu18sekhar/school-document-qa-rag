@@ -50,6 +50,10 @@ import static org.awaitility.Awaitility.await;
         // Single worker so "upload then assert" is not a race between four.
         "rag.ingestion.worker-threads=1",
         "rag.retrieval.similarity-threshold=0.62",
+        // Off by default in tests: the stub chat model returns canned text, so a
+        // "rewrite" would be nonsense and every assertion about retrieval would
+        // depend on it. QueryRewritingIT turns it back on and tests it directly.
+        "rag.chat.query-rewriting-enabled=false",
         "logging.level.com.docqa.rag=DEBUG"
 })
 public abstract class AbstractPostgresIT {

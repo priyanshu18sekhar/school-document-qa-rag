@@ -55,6 +55,7 @@ public class ChatService {
 
     private final RetrievalService retrieval;
     private final ResilientChatModel chatModel;
+    private final QueryRewriter queryRewriter;
     private final PromptBuilder promptBuilder;
     private final ConversationRepository conversations;
     private final TokenCounter tokens;
@@ -63,6 +64,7 @@ public class ChatService {
 
     public ChatService(RetrievalService retrieval,
                        ResilientChatModel chatModel,
+                       QueryRewriter queryRewriter,
                        PromptBuilder promptBuilder,
                        ConversationRepository conversations,
                        TokenCounter tokens,
@@ -70,6 +72,7 @@ public class ChatService {
                        RagProperties properties) {
         this.retrieval = retrieval;
         this.chatModel = chatModel;
+        this.queryRewriter = queryRewriter;
         this.promptBuilder = promptBuilder;
         this.conversations = conversations;
         this.tokens = tokens;
@@ -82,7 +85,15 @@ public class ChatService {
         String question = request.question().strip();
         String category = normaliseCategory(request.category());
 
-        var outcome = retrieval.retrieve(tenantId, question, category);
+        // History has to be loaded before retrieval, not after: a follow-up
+        // like "and for class 11?" must be resolved into a standalone query
+        // before it is embedded, or retrieval finds nothing and we refuse a
+        // question we can answer. See QueryRewriter.
+        var history = conversations.findRecentMessages(
+                tenantId, conversationId, config.maxHistoryTurns() * 2);
+        String searchQuery = queryRewriter.rewrite(question, history);
+
+        var outcome = retrieval.retrieve(tenantId, searchQuery, category);
 
         // ---- Gate 1: no grounding, no model call. -------------------------
         if (!outcome.grounded()) {
@@ -94,8 +105,8 @@ public class ChatService {
                     null, null, null, outcome.latency().toMillis(), null, nearest);
         }
 
-        var history = conversations.findRecentMessages(
-                tenantId, conversationId, config.maxHistoryTurns() * 2);
+        // The prompt gets the user's ORIGINAL wording, not the rewrite - the
+        // rewrite exists to steer retrieval, and showing it back would be odd.
         var prompt = promptBuilder.build(question, outcome.chunks(), history);
 
         var result = chatModel.call(prompt.messages());
@@ -135,13 +146,16 @@ public class ChatService {
     /** Shared by the streaming path, which needs the same retrieval and prompt. */
     public PreparedTurn prepare(TenantId tenantId, UUID conversationId, ChatRequest request) {
         String question = request.question().strip();
-        var outcome = retrieval.retrieve(tenantId, question, normaliseCategory(request.category()));
+        var history = conversations.findRecentMessages(
+                tenantId, conversationId, config.maxHistoryTurns() * 2);
+        String searchQuery = queryRewriter.rewrite(question, history);
+
+        var outcome = retrieval.retrieve(
+                tenantId, searchQuery, normaliseCategory(request.category()));
 
         if (!outcome.grounded()) {
             return new PreparedTurn(question, outcome, null, List.of());
         }
-        var history = conversations.findRecentMessages(
-                tenantId, conversationId, config.maxHistoryTurns() * 2);
         var prompt = promptBuilder.build(question, outcome.chunks(), history);
         return new PreparedTurn(question, outcome, prompt, prompt.usedContext());
     }

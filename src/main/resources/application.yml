@@ -235,6 +235,11 @@ rag:
     context-token-budget: ${RAG_CONTEXT_TOKEN_BUDGET:3000}
     max-output-tokens: ${RAG_MAX_OUTPUT_TOKENS:800}
     model-timeout-seconds: ${RAG_MODEL_TIMEOUT_SECONDS:60}
+    # Rewrites "and for class 11?" into a standalone query before retrieval.
+    # Without it, follow-ups are embedded as-is and retrieve nothing - history
+    # in the prompt cannot help, because retrieval runs before the model does.
+    # One small extra model call, on turns that have history only.
+    query-rewriting-enabled: ${RAG_QUERY_REWRITING:true}
     refusal-message: >-
       I could not find that in the available documents. Please rephrase the
       question, or check that the relevant document has been uploaded.
