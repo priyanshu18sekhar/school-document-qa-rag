@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Document Q&amp;A</title>
+<!--
+  Deliberately one file with no build step and no dependencies. The assignment
+  is a backend one; this page exists so the demo can show upload, a grounded
+  answer, a refusal and the citations without anyone installing a frontend
+  toolchain. Swagger UI at /swagger-ui.html covers the rest of the API.
+-->
+<style>
+  :root { color-scheme: light dark; --line:#8883; --dim:#8888; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
+         max-width: 820px; margin: 0 auto; padding: 24px 20px 64px; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: var(--dim); margin: 0 0 24px; font-size: 13px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin: 0 0 18px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 8px 0 3px; }
+  input, textarea, select, button {
+    font: inherit; padding: 7px 9px; border: 1px solid var(--line);
+    border-radius: 6px; background: transparent; color: inherit; width: 100%; }
+  button { cursor: pointer; font-weight: 600; width: auto; padding: 7px 16px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .row > * { flex: 1 1 160px; }
+  .row > .narrow { flex: 0 0 auto; }
+  #answer { white-space: pre-wrap; margin: 10px 0 0; min-height: 1.5em; }
+  .refused { color: #c2410c; }
+  .status { font-size: 12px; color: var(--dim); margin-top: 8px; }
+  ol.sources { padding-left: 22px; margin: 10px 0 0; font-size: 13px; }
+  ol.sources li { margin-bottom: 8px; }
+  .cite { font-weight: 600; }
+  .score { color: var(--dim); font-weight: normal; }
+  .snippet { color: var(--dim); display: block; margin-top: 2px; }
+  .gone { text-decoration: line-through; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  code { font-size: 12px; background: #8881; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<h1>Document Q&amp;A</h1>
+<p class="sub">
+  Answers come only from uploaded documents, with citations.
+  API docs at <a href="/swagger-ui.html">/swagger-ui.html</a>.
+</p>
+
+<fieldset>
+  <legend>Tenant</legend>
+  <div class="row">
+    <div>
+      <label for="tenant">X-Tenant-Id — every request is scoped to this</label>
+      <input id="tenant" value="greenwood">
+    </div>
+    <div class="narrow"><button id="refresh">Reload documents</button></div>
+  </div>
+  <table id="docs"><thead>
+    <tr><th>Title</th><th>Category</th><th>Status</th><th>Chunks</th><th></th></tr>
+  </thead><tbody></tbody></table>
+</fieldset>
+
+<fieldset>
+  <legend>Upload</legend>
+  <div class="row">
+    <div><label for="file">PDF, DOCX, TXT or Markdown, up to 20 MB</label>
+         <input id="file" type="file" accept=".pdf,.docx,.txt,.md,.markdown"></div>
+    <div><label for="category">Category (optional)</label>
+         <input id="category" placeholder="FEES"></div>
+    <div class="narrow"><button id="upload">Upload</button></div>
+  </div>
+  <div class="status" id="uploadStatus"></div>
+</fieldset>
+
+<fieldset>
+  <legend>Ask</legend>
+  <label for="question">Question</label>
+  <textarea id="question" rows="2">What is the late fee if I pay term 2 three weeks late?</textarea>
+  <div class="row" style="margin-top:10px">
+    <div><label for="askCategory">Restrict to category (optional)</label>
+         <input id="askCategory" placeholder="FEES"></div>
+    <div class="narrow"><button id="ask">Ask</button></div>
+    <div class="narrow"><button id="askStream">Ask (streaming)</button></div>
+    <div class="narrow"><button id="stop" disabled>Stop</button></div>
+    <div class="narrow"><button id="newConv">New conversation</button></div>
+  </div>
+  <p id="answer"></p>
+  <div class="status" id="meta"></div>
+  <ol class="sources" id="sources"></ol>
+</fieldset>
+
+<script>
+const $ = id => document.getElementById(id);
+let conversationId = null;
+let controller = null;
+
+const tenant = () => $('tenant').value.trim() || 'greenwood';
+const headers = extra => Object.assign({'X-Tenant-Id': tenant()}, extra || {});
+
+function setBusy(busy) {
+  $('ask').disabled = busy;
+  $('askStream').disabled = busy;
+  $('stop').disabled = !busy;
+}
+
+async function loadDocuments() {
+  const body = $('docs').querySelector('tbody');
+  body.innerHTML = '';
+  const res = await fetch('/api/v1/documents?size=50', {headers: headers()});
+  if (!res.ok) {
+    body.innerHTML = `<tr><td colspan="5">${(await res.json()).detail || res.status}</td></tr>`;
+    return;
+  }
+  const page = await res.json();
+  if (!page.items.length) {
+    body.innerHTML = '<tr><td colspan="5">No documents yet.</td></tr>';
+    return;
+  }
+  for (const doc of page.items) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${escapeHtml(doc.title)}</td><td>${doc.category ?? '—'}</td>
+      <td>${doc.status}${doc.errorMessage ? ' — ' + escapeHtml(doc.errorMessage) : ''}</td>
+      <td>${doc.chunkCount}</td><td></td>`;
+    const del = document.createElement('button');
+    del.textContent = 'Delete';
+    del.onclick = async () => {
+      await fetch('/api/v1/documents/' + doc.id, {method: 'DELETE', headers: headers()});
+      loadDocuments();
+    };
+    tr.lastElementChild.appendChild(del);
+    body.appendChild(tr);
+    // Ingestion is asynchronous, so poll while anything is still PROCESSING.
+    if (doc.status === 'PROCESSING') setTimeout(loadDocuments, 1200);
+  }
+}
+
+$('refresh').onclick = loadDocuments;
+
+$('upload').onclick = async () => {
+  const file = $('file').files[0];
+  if (!file) { $('uploadStatus').textContent = 'Choose a file first.'; return; }
+
+  const form = new FormData();
+  form.append('file', file);
+  if ($('category').value.trim()) form.append('category', $('category').value.trim());
+
+  $('uploadStatus').textContent = 'Uploading…';
+  const res = await fetch('/api/v1/documents', {method: 'POST', headers: headers(), body: form});
+  const body = await res.json();
+
+  $('uploadStatus').textContent = res.ok
+    ? (body.message || 'Accepted.')
+    : `${res.status} — ${body.detail || 'Upload failed.'}`;
+  loadDocuments();
+};
+
+$('newConv').onclick = () => {
+  conversationId = null;
+  $('meta').textContent = 'Started a new conversation.';
+};
+
+$('stop').onclick = () => { if (controller) controller.abort(); };
+
+function requestBody() {
+  const body = {question: $('question').value};
+  if (conversationId) body.conversationId = conversationId;
+  if ($('askCategory').value.trim()) body.category = $('askCategory').value.trim();
+  return body;
+}
+
+function renderSources(sources) {
+  const list = $('sources');
+  list.innerHTML = '';
+  for (const source of sources || []) {
+    const li = document.createElement('li');
+    const where = source.pageNumber ? `, page ${source.pageNumber}` : '';
+    li.innerHTML =
+      `<span class="cite ${source.available ? '' : 'gone'}">${escapeHtml(source.documentTitle)}${where}</span>
+       <span class="score">similarity ${source.similarity.toFixed(3)}</span>
+       <span class="snippet">${escapeHtml(source.snippet)}</span>`;
+    list.appendChild(li);
+  }
+}
+
+$('ask').onclick = async () => {
+  setBusy(true);
+  $('answer').textContent = 'Thinking…';
+  $('answer').className = '';
+  $('sources').innerHTML = '';
+  $('meta').textContent = '';
+  try {
+    const res = await fetch('/api/v1/chat', {
+      method: 'POST',
+      headers: headers({'Content-Type': 'application/json'}),
+      body: JSON.stringify(requestBody())
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      $('answer').textContent = `${res.status} — ${body.detail || 'Request failed.'}`;
+      return;
+    }
+    conversationId = body.conversationId;
+    $('answer').textContent = body.answer;
+    $('answer').className = body.refused ? 'refused' : '';
+    renderSources(body.sources);
+    const m = body.metadata;
+    $('meta').textContent =
+      `retrieval ${m.retrievalMs}ms` +
+      (m.modelMs != null ? ` · model ${m.modelMs}ms` : ' · no model call (refused)') +
+      (m.promptTokens != null ? ` · ${m.promptTokens} in / ${m.completionTokens} out` : '') +
+      ` · top similarity ${m.topSimilarity} (threshold ${m.threshold})`;
+  } catch (e) {
+    $('answer').textContent = 'Request failed: ' + e.message;
+  } finally {
+    setBusy(false);
+  }
+};
+
+$('askStream').onclick = async () => {
+  setBusy(true);
+  $('answer').textContent = '';
+  $('answer').className = '';
+  $('sources').innerHTML = '';
+  $('meta').textContent = 'streaming…';
+
+  controller = new AbortController();
+  const started = performance.now();
+  let firstToken = null;
+
+  try {
+    const res = await fetch('/api/v1/chat/stream', {
+      method: 'POST',
+      headers: headers({'Content-Type': 'application/json'}),
+      body: JSON.stringify(requestBody()),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      $('answer').textContent = `${res.status} — ${body.detail || 'Request failed.'}`;
+      return;
+    }
+
+    // Minimal SSE parser: events are separated by a blank line.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+
+      let split;
+      while ((split = buffer.indexOf('\n\n')) >= 0) {
+        const raw = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+
+        let name = 'message', data = '';
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event:')) name = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        const payload = JSON.parse(data);
+
+        if (name === 'token') {
+          if (firstToken === null) firstToken = Math.round(performance.now() - started);
+          $('answer').textContent += payload.text;
+        } else if (name === 'sources') {
+          renderSources(payload);
+        } else if (name === 'done') {
+          conversationId = payload.conversationId;
+          if (payload.refused) $('answer').className = 'refused';
+          $('meta').textContent =
+            `first token ${firstToken ?? '—'}ms · ` +
+            (payload.refused ? 'refused, no model call' : 'streamed');
+        } else if (name === 'error') {
+          $('answer').textContent += '\n' + payload.message;
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      // The server logs the cancellation and drops the upstream model call.
+      $('meta').textContent = 'Stopped — the upstream model call was cancelled.';
+    } else {
+      $('answer').textContent = 'Request failed: ' + e.message;
+    }
+  } finally {
+    controller = null;
+    setBusy(false);
+  }
+};
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+loadDocuments();
+</script>
+</body>
+</html>
