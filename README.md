@@ -479,9 +479,32 @@ hours later as bad retrieval.
 Provider selection is **config, not code**. No class names a vendor:
 
 ```bash
-RAG_CHAT_PROVIDER=anthropic       # openai | anthropic | ollama | none
-RAG_EMBEDDING_PROVIDER=openai     # openai | ollama | none
+RAG_CHAT_PROVIDER=mistral         # openai | mistral | google-genai | anthropic | ollama | none
+RAG_EMBEDDING_PROVIDER=mistral    # openai | mistral | ollama | none
 ```
+
+### Running it free, with no card
+
+| Provider | Chat | Embeddings | Notes |
+|---|:---:|:---:|---|
+| **Mistral** | ✅ free | ✅ free | One key covers both. `mistral-embed` is **1024** dims, so set `RAG_EMBEDDING_DIMENSIONS=1024` and rebuild the DB. |
+| **Google Gemini** | ✅ free | ❌ | Free AI Studio key works for chat. Spring AI 2.0's Google embedding module is **Vertex AI** based and needs a GCP project with billing — pair Gemini chat with Mistral or Ollama embeddings. |
+| **Ollama** | ✅ local | ✅ local | No key, no network. ~2.3 GB of model download. `nomic-embed-text` is **768** dims. |
+| **OpenAI** | paid | paid | The default. ~1.2¢ per 1000 pages, ~0.2¢ per question. |
+
+`.env.example` has a copy-paste block for each. Note that switching embedding provider
+changes the vector dimension, which is a schema change — `docker compose down -v && docker
+compose up` rebuilds it, and the app refuses to start against a mismatched column rather
+than silently mixing two embedding spaces.
+
+**A wrinkle worth knowing about.** Several of Spring AI 2.0's provider autoconfigurations are
+gated only on the jar being on the classpath, not on that provider being *selected*. Mistral's
+moderation and OCR autoconfigurations both instantiate eagerly and throw `Mistral API key must
+be set` at context refresh — so merely adding the Mistral starter broke startup even with
+`spring.ai.model.chat=openai`. Both are excluded in `application.yml`; this service does
+neither moderation nor OCR. The chat and embedding autoconfigurations are correctly gated and
+stay. Google's embedding connection has the same shape, demanding a GCP `project-id`
+unconditionally, which is why only the Gemini *chat* starter is included.
 
 | Setting | Default | Notes |
 |---|---|---|

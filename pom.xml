@@ -91,6 +91,17 @@
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-ollama</artifactId>
         </dependency>
+        <!-- Google AI Studio (Gemini). Present so the service can run on a free
+             tier with no card on file; selected with spring.ai.model.* = google-genai. -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-google-genai</artifactId>
+        </dependency>
+        <!-- Mistral: free tier covers both chat and embeddings with one key. -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-mistral-ai</artifactId>
+        </dependency>
 
         <!-- ===== Document text extraction ===== -->
         <dependency>

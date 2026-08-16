@@ -2,6 +2,23 @@ spring:
   application:
     name: document-qa-rag
 
+  autoconfigure:
+    exclude:
+      # Spring AI 2.0 ships a few provider autoconfigurations that are gated only
+      # on the jar being present, not on that provider being selected. They then
+      # demand credentials at context refresh and take the whole application down
+      # even when spring.ai.model.* points somewhere else entirely.
+      #
+      # Mistral's moderation and OCR models are two such: this service does
+      # neither, and without these exclusions merely having the Mistral starter
+      # on the classpath makes startup fail with "Mistral API key must be set" -
+      # even when the configured provider is OpenAI, or none at all.
+      #
+      # Mistral's chat and embedding autoconfigurations are correctly gated on
+      # spring.ai.model.*, so they stay.
+      - org.springframework.ai.model.mistralai.autoconfigure.MistralAiModerationAutoConfiguration
+      - org.springframework.ai.model.mistralai.autoconfigure.MistralAiOcrAutoConfiguration
+
   threads:
     virtual:
       enabled: true          # NFR-3: HTTP request threads are virtual, so a slow
@@ -70,6 +87,44 @@ spring:
         options:
           model: ${RAG_CHAT_MODEL:claude-sonnet-4-5}
           temperature: 0.0
+
+    google:
+      genai:
+        # Google AI Studio key (free tier, no card required).
+        api-key: ${GOOGLE_API_KEY:}
+        chat:
+          options:
+            model: ${RAG_CHAT_MODEL:gemini-2.5-flash}
+            temperature: 0.0
+        embedding:
+          api-key: ${GOOGLE_API_KEY:}
+          text:
+            options:
+              model: ${RAG_EMBEDDING_MODEL:gemini-embedding-001}
+              # gemini-embedding-001 is a Matryoshka model: it is trained so that
+              # a truncated prefix of the vector is still a usable embedding, and
+              # the output width is requestable. Asking for 1536 rather than its
+              # native 3072 means this provider drops into the existing
+              # vector(1536) column with no migration and no re-ingest - the same
+              # schema serves OpenAI and Gemini. That is the whole reason this
+              # number is here rather than 3072.
+              dimensions: ${RAG_EMBEDDING_DIMENSIONS:1536}
+
+    mistralai:
+      # Mistral's free tier covers chat and embeddings on one key, which makes
+      # it the cheapest way to run this service end to end with no card.
+      api-key: ${MISTRAL_API_KEY:}
+      chat:
+        options:
+          model: ${RAG_CHAT_MODEL:mistral-small-latest}
+          temperature: 0.0
+      embedding:
+        options:
+          # mistral-embed is 1024-dimensional and, unlike gemini-embedding-001,
+          # the width is not requestable. Selecting it therefore requires
+          # RAG_EMBEDDING_DIMENSIONS=1024 and a rebuilt database - the startup
+          # validator refuses to run against a vector(1536) column.
+          model: ${RAG_EMBEDDING_MODEL:mistral-embed}
 
     ollama:
       base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
