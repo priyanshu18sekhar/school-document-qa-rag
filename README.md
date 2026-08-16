@@ -71,6 +71,125 @@ Tests pass with **no API key set** — the providers are switched off with
 
 ---
 
+## See it working
+
+Real output, captured from a running instance against `mistral-embed` +
+`mistral-small-latest` and the four documents in `samples/`. Every number below is
+copied verbatim from a terminal, not written by hand.
+
+### A grounded answer, with a figure it had to work out
+
+The policy states a rate — Rs 500 per week — and the question asks about three weeks.
+
+```console
+$ curl -sS -X POST localhost:8080/api/v1/chat \
+    -H 'Content-Type: application/json' -H 'X-Tenant-Id: greenwood' \
+    -d '{"question":"What is the late fee if I pay term 2 three weeks late?"}'
+
+answer   : The late fee for paying term 2 three weeks late is Rs 1,500 [1].
+refused  : false
+
+sources:
+  [1] Fee Policy 2026-27   sim=0.8632
+      A late fee of Rs 500 per week, or part thereof, applies to any term fee
+      received after its due date. The late fee is capped at Rs 4,000 per term...
+  [2] Fee Policy 2026-27   sim=0.7905
+  [3] Fee Policy 2026-27   sim=0.7626
+
+retrieval 542ms | model 1028ms | 982 tokens in / 23 out
+top similarity 0.8632 (threshold 0.75)
+```
+
+### An out-of-scope question — refused, with no model call
+
+```console
+$ ... -d '{"question":"Who won the football world cup in 2022?"}'
+
+answer   : I could not find that in the available documents...
+refused  : true
+sources  : []
+retrieval 61ms | model —        ← no model latency, because no model call happened
+top similarity 0.6555 (threshold 0.75)
+```
+
+### A near miss — the case a threshold cannot catch
+
+There is no hostel fee anywhere in the corpus, but the question is *about* fees and late
+payment, so it scores 0.8069 — well above the bar. The second gate catches it.
+
+```console
+$ ... -d '{"question":"What is the late fee for the hostel accommodation charge?"}'
+
+refused  : true      top similarity 0.8069 (threshold 0.75)   ← caught by the sentinel gate
+```
+
+### A follow-up that only works because it is rewritten first
+
+```console
+Q1: "What is the tuition fee for Class 9 in term 2?"   → The tuition fee for Class 9
+                                                          in Term 2 is Rs 19,500 [1].
+Q2: "And for Class 11 Science?"                        → The tuition fee for Class 11
+                                                          Science in Term 2 is Rs 24,000 [1].
+```
+
+Server log for Q2 — the rewrite is what gets embedded, not the raw follow-up:
+
+```
+DEBUG QueryRewriter - Rewrote follow-up for retrieval:
+      'And for Class 11 Science?' -> 'Tuition fee for Class 11 Science'
+```
+
+Raw, that question embeds at 0.7492 and is refused. Rewritten, 0.8466 and answered.
+
+### Streaming: tokens, then sources as a distinct terminal event
+
+```console
+$ curl -N -X POST localhost:8080/api/v1/chat/stream ...
+
+event order: token x7 -> sources -> done
+
+sources: [1] Term 2 Examination Circular  sim=0.8108  available=true
+done:    {"conversationId":"6942...","messageId":"5ac0...","refused":false}
+```
+
+### Deletion stops citations immediately
+
+```console
+$ curl -X DELETE localhost:8080/api/v1/documents/{id}     → 204
+$ ... -d '{"question":"What is the late fee per week...?"}'
+  refused: true | sources: 0
+```
+
+The conversation that cited it still shows the citation, flagged `available: false`.
+
+### The whole grounding evaluation
+
+```console
+$ python3 samples/evaluate.py
+
+  PASS  want=answer  got=answer  sim=0.8610  gate=-         late fee per week
+  PASS  want=answer  got=answer  sim=0.7845  gate=-         route 4 departure time
+  ...
+  PASS  want=refuse  got=refuse  sim=0.6555  gate=threshold football world cup
+  PASS  want=refuse  got=refuse  sim=0.8658  gate=sentinel  transport charge above 25 km
+==================================================================================
+  20/20 correct (100%)
+  refusals: 3 by the threshold gate, 5 by the sentinel gate
+```
+
+### The test suite, with no API key set
+
+```console
+$ ./mvnw verify
+
+Tests run: 36, Failures: 0, Errors: 0, Skipped: 0     (unit)
+Tests run: 40, Failures: 0, Errors: 0, Skipped: 0     (integration, real pgvector)
+All coverage checks have been met.
+BUILD SUCCESS
+```
+
+---
+
 ## Architecture
 
 Two paths. They meet only at the database.
