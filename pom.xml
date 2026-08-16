@@ -161,6 +161,13 @@
             <artifactId>reactor-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- Ingestion is asynchronous, so tests must wait for a terminal
+                 status rather than Thread.sleep and hope. -->
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -170,15 +177,42 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
 
+            <!-- Unit tests: fast, no Docker. `./mvnw test` runs only these. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <!-- Testcontainers + Docker: keep the JVM stable under parallel container startup -->
-                    <argLine>@{argLine} -Xshare:off</argLine>
+                    <argLine>@{argLine}</argLine>
+                    <excludes>
+                        <exclude>**/*IT.java</exclude>
+                    </excludes>
                 </configuration>
             </plugin>
 
+            <!-- Integration tests: need Docker for Testcontainers. `./mvnw verify`
+                 runs these too. Separating them means a contributor without
+                 Docker still gets a useful `./mvnw test`, and CI gets both. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <argLine>@{argLine}</argLine>
+                    <includes>
+                        <include>**/*IT.java</include>
+                    </includes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Declared after failsafe so the coverage check sees integration
+                 test coverage as well. Both test runs append to one exec file. -->
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
