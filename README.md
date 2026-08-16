@@ -33,6 +33,14 @@ Load the sample corpus (four realistic school documents in `samples/`):
 ./samples/load.sh shelbyville  # same corpus, second tenant, for the isolation demo
 ```
 
+Then measure it. These two run against the live service with whatever provider you
+configured, and are how the numbers in this README were produced:
+
+```bash
+python3 samples/calibrate.py   # similarity scores + threshold sweep
+python3 samples/evaluate.py    # end-to-end: 20 labelled questions, and which gate fired
+```
+
 Then:
 
 ```bash
@@ -216,57 +224,77 @@ score is meaningless and nothing anywhere throws.
 
 ## Similarity threshold
 
-**Configured: 0.62** (cosine, `rag.retrieval.similarity-threshold`).
+**The headline result: a similarity threshold cannot separate a near-miss question from a
+real one, and I have the measurements to prove it.** That finding shaped the design, so it
+is worth walking through.
 
-I did not pick this by feel. `ThresholdCalibrationIT` ingests the sample corpus, runs 10
-questions the corpus **does** answer and 6 it **does not** — three of them deliberate near
-misses that use the corpus's own vocabulary to ask about something it never states — and
-sweeps the threshold, reporting how many of each get through at each value.
+`samples/calibrate.py` points a labelled question set at a running instance — 12 questions
+the sample corpus genuinely answers, 8 it does not — and reports the top similarity each one
+achieves. Against `mistral-embed`:
 
 ```
-threshold   answerable found   unanswerable leaked   verdict
-0.50        3 / 10             2 / 6                 answers questions it should refuse
-0.55        2 / 10             1 / 6                 answers questions it should refuse
-0.60        2 / 10             1 / 6                 answers questions it should refuse
-0.62        2 / 10             0 / 6                 no leakage          ← chosen
-0.65        2 / 10             0 / 6                 no leakage
-0.70        1 / 10             0 / 6                 refuses 9 answerable
+ANSWERABLE  (want these ABOVE the bar)     UNANSWERABLE (want these BELOW)
+  0.7845  route 4 bus departure time         0.8658  transport charge above 25 km
+  0.7863  re-evaluation charge               0.8304  study leave entitlement
+  0.7981  fees unpaid after 45 days          0.8290  pre-nursery playgroup fee
+  ...                                        0.8069  late fee on hostel charge
+  0.8721  casual leave days                  0.7630  staff medical insurance
+  0.8755  transport charge 10-15 km          0.7097  reset my portal password
+                                             0.6677  capital city of Australia
+                                             0.6555  who won the world cup
+lowest answerable   : 0.7845
+highest unanswerable: 0.8658          separation: -0.0813   ← the sets OVERLAP
 ```
 
-**0.62 is the lowest threshold at which no out-of-scope question gets through.** That is
-the number that matters: below it, the near-miss questions ("what is the late fee for the
-*hostel* charge?", a fee the policy never mentions) start retrieving the general late-fee
-clause and the model would answer from it. Going higher buys no additional safety and only
-costs recall.
+The four highest-scoring *unanswerable* questions all outscore the lowest *answerable* one.
+That is not a tuning failure — it is what the embedding is telling us, and it is correct:
+"what is the transport charge for a distance above 25 km?" really is nearly identical, as
+text, to a document that lists transport charges by distance band. It just stops at 15 km.
+No scalar threshold can distinguish "this document is about your question" from "this
+document answers your question".
 
-**Be honest about what this measurement is.** The run above is against the offline stub
-embedder used in tests, which matches on shared words rather than meaning. Its *absolute*
-values are not the values a real embedding model produces, and its recall column is
-correspondingly poor — it cannot connect "how many days of casual leave" to a table row
-reading `Casual leave | 12 days`. **I had no API key while building this, so 0.62 is not
-yet validated against real embeddings.** What is validated is the method, the harness and
-the fact that the threshold is genuinely applied by the query (the sweep asserts
-monotonicity — recall and leakage can only fall as the bar rises, which would break
-immediately if the threshold were not in the SQL).
+**So the threshold is set to do the job it can actually do.** At **0.75** it keeps all 12
+answerable questions and rejects the three genuinely off-topic ones outright, for free, with
+no model call. The near-misses are the second gate's job — and that is precisely why the
+second gate exists rather than being decoration on top of the first.
 
-To calibrate properly, one command:
+End-to-end, with both gates in play (`samples/evaluate.py`):
+
+```
+20/20 correct (100%)
+refusals: 3 by the threshold gate, 5 by the sentinel gate
+```
+
+Every one of the five that slipped past the threshold was caught by the model reporting
+insufficient context. Neither gate is sufficient alone; the split of labour is the design.
+
+**Reproduce it in two minutes** — the service must be running with the corpus loaded:
 
 ```bash
-OPENAI_API_KEY=sk-... ./mvnw verify -Dit.test=ThresholdCalibrationIT \
-    -Dspring.ai.model.embedding=openai
+./samples/load.sh greenwood
+python3 samples/calibrate.py     # scores + threshold sweep
+python3 samples/evaluate.py      # end-to-end pass/fail, and which gate fired
 ```
 
-My expectation is that a real model lands somewhat higher, around 0.70–0.75, because
-semantic embeddings put unrelated text closer to 0.5 than a lexical model does. I would
-re-run the sweep and take the lowest zero-leakage value rather than assume.
+### The threshold is model-specific
 
-Production gives you the same signal without the harness: **on every refusal the service
-logs the best-scoring chunk that did not clear the bar**, so a week of logs tells you
-whether the threshold is too high:
+`0.75` is measured for **`mistral-embed`**. Do not carry it to another model. Embedding
+models differ enormously in where they put unrelated text — Mistral's floor for
+genuinely off-topic questions sits around 0.65, where OpenAI's `text-embedding-3-small`
+typically lands far lower. The configured default of **0.62 assumes OpenAI and is not
+measured**; if you run this on OpenAI, spend the two minutes above and set your own.
+
+There is also a third source of the same signal, with no harness at all: **every refusal logs
+the best chunk that did not clear the bar**, so a week of production logs tells you whether
+the threshold is wrong.
 
 ```
-Refusing: no chunk cleared 0.62. Closest was Fee Policy 2026-27 p2 at similarity 0.5841
+Refusing: no chunk cleared 0.75. Closest was Fee Policy 2026-27 p2 at similarity 0.7097
 ```
+
+`ThresholdCalibrationIT` runs the same sweep offline against the stub embedder on every
+build. It cannot produce a meaningful *number* — the stub is lexical — but it asserts
+monotonicity, which would break immediately if the threshold stopped being applied in SQL.
 
 ---
 
@@ -436,7 +464,9 @@ transaction at all.
 
 ## Testing
 
-**73 tests. 86% line coverage overall** (the build fails below 60% on service packages).
+**73 tests. 86% line coverage overall** (the build fails below 60% on service packages),
+plus a 20-question end-to-end grounding evaluation that runs against a live provider
+(`samples/evaluate.py`) and currently scores **20/20**.
 
 ```
 36 unit          chunking boundary cases, extractors, error classification — no Docker
@@ -535,36 +565,43 @@ several in a row bias the model toward refusing again.
 Things I chose not to do, or could not verify. In rough order of how much they would
 bother me in production.
 
-1. **The threshold is not calibrated against real embeddings.** I had no API key. The
-   harness, the method and the near-miss logging are all in place; the number needs one
-   command and a key. This is the single biggest gap.
-2. **No end-to-end run against a live provider.** Every layer is exercised by tests, but
-   the actual HTTP call to OpenAI is stubbed. The wire call is Spring AI's code, not mine,
-   but I have not seen it work with my own eyes and I am not going to claim otherwise.
+1. **The default threshold (0.62) assumes OpenAI and is not measured.** The measured value
+   is 0.75, for `mistral-embed`, which is what I ran against. Thresholds do not transfer
+   between embedding models. `samples/calibrate.py` produces the right number for whatever
+   provider you configure in about two minutes.
+2. **A similarity threshold cannot catch near-misses at all** — measured, not assumed; see
+   the Similarity threshold section. The model-sentinel gate covers them and gets 5/5 on
+   the evaluation set, but it is a prompt instruction, so it is best-effort rather than a
+   guarantee. A reranker or a small entailment check would make it a stronger gate; that is
+   the top item on the two-week list.
 3. **Chunks never span pages, so a clause split across a page break is weaker in
    retrieval.** Deliberate — see Chunking. With more time I would keep the hard page
    attribution but add a small "bridge" chunk carrying the tail of page N and head of N+1,
    cited as a range and clearly labelled.
-4. **The ingestion queue is in memory.** `kill -9` loses queued-but-unstarted jobs and
+4. **Retrieval measured 542 ms end to end**, just over NFR-1's 500 ms. The database half is
+   ~2 ms; effectively all of it is the embedding provider's HTTP round trip. Caching query
+   embeddings would help repeat questions, but the honest fix is a provider in the same
+   region, or a local embedding model.
+5. **The ingestion queue is in memory.** `kill -9` loses queued-but-unstarted jobs and
    leaves those documents in PROCESSING forever. Graceful shutdown drains in-flight work,
    and re-uploading recovers a stuck document. A real fix is an outbox table polled by the
    workers, which also gives you multi-instance ingestion.
-5. **Scanned PDFs are rejected, not OCR'd.** The error message says so explicitly rather
+6. **Scanned PDFs are rejected, not OCR'd.** The error message says so explicitly rather
    than silently ingesting zero chunks.
-6. **DOCX has no page numbers** — Word paginates at render time, so there is no page number
+7. **DOCX has no page numbers** — Word paginates at render time, so there is no page number
    in the file. Citations report `null` rather than inventing one. Rendering via headless
    LibreOffice would recover it.
-7. **No authentication.** `X-Tenant-Id` is a plain header, as the brief permits. In
+8. **No authentication.** `X-Tenant-Id` is a plain header, as the brief permits. In
    production it must come from a signed token; today any caller can name any tenant. The
    isolation machinery is exactly the same either way — only the source of the value
    changes — but this is a header, not a security boundary.
-8. **Categories are free-form**, normalised to upper case rather than validated against an
+9. **Categories are free-form**, normalised to upper case rather than validated against an
    enum. Hard-coding FEES/HR/EXAM/TRANSPORT would mean a code change to file an
    "ADMISSIONS" document. Case normalisation is the part that matters: without it "fees"
    and "FEES" become two categories and a filter silently returns nothing.
-9. **`GET /conversations/{id}` is unpaginated.** Fine for a support conversation, wrong for
+10. **`GET /conversations/{id}` is unpaginated.** Fine for a support conversation, wrong for
    one that has run for a year.
-10. **No `DELETE /conversations/{id}`**, and no retention policy on stored questions —
+11. **No `DELETE /conversations/{id}`**, and no retention policy on stored questions —
     which are personal data in a school context.
 
 ### With two more weeks
@@ -582,19 +619,34 @@ admit anything below the vector threshold, or the refusal guarantee quietly dies
 
 ## One thing that surprised me
 
-**How much of the correctness lives in the schema rather than the code.**
+**That the similarity threshold — the mechanism I had assumed was the refusal system —
+provably cannot do the job on its own, and I only found out because I measured it.**
 
-I expected the interesting problems to be chunk sizes and prompt wording. The two changes
-that most improved this system were both DDL. The composite foreign key
-`(document_id, tenant_id) → documents(id, tenant_id)` turns tenant isolation from a
-property I have to maintain in every query into one Postgres refuses to let me violate —
-a whole class of bug deleted by four lines of SQL. And making the embedding dimension a
-Flyway placeholder with a startup check turned the nastiest possible misconfiguration
-(vectors from two different models in one table, every score meaningless, nothing throwing
-anywhere) into a boot failure with a message that tells you what to do.
+I built the calibration harness expecting it to hand me a number. Instead it showed the two
+question sets *overlapping*: the highest-scoring question the corpus cannot answer
+("what is the transport charge for a distance above 25 km?", 0.8658) scores higher than the
+lowest-scoring question it can ("what time does the route 4 bus depart?", 0.7845). There is
+no threshold that keeps one and rejects the other. Turning the dial up loses real answers
+before it stops the wrong ones.
 
-A close second: watching the query planner *correctly* refuse to use my HNSW index at 2,000
-rows, and only choose it at 12,000. I had assumed "index exists" meant "index is used", and
-was ready to file that as a bug in my own migration. Measuring the plan at two scales was
-the difference between a wrong conclusion and understanding where the crossover actually
-is.
+The reason is obvious in hindsight and I had not thought it through: cosine similarity
+measures whether a chunk is *about* your question, not whether it *answers* it. A table of
+transport charges by distance band is maximally about a question asking for the charge at
+25 km. It simply stops at 15 km. That is a fact about the document's content, not its
+embedding, and no amount of tuning surfaces it.
+
+What makes this more than an interesting negative result is that it changed how I read my
+own design. I had written the model-sentinel gate as a belt-and-braces afterthought behind
+the "real" threshold gate. The measurements say it is the other way round: the threshold
+catches the easy cases cheaply — three genuinely off-topic questions, refused for free with
+no model call — and every one of the five hard cases is caught by the sentinel. The gate I
+thought was decoration is doing the load-bearing work, which is also why "it is only a
+prompt instruction, so it is best-effort" is now the first thing on my list of things to
+fix rather than a caveat I would have mentioned in passing.
+
+Two smaller ones. The query planner *correctly* refused to use my HNSW index at 2,000 rows
+and only chose it at 12,000 — I had assumed "index exists" meant "index is used" and was
+ready to file a bug against my own migration. And a surprising amount of this system's
+correctness ended up living in DDL rather than code: the composite foreign key
+`(document_id, tenant_id) → documents(id, tenant_id)` turns tenant isolation from something
+every query must remember into something Postgres will not let me get wrong.
