@@ -161,6 +161,17 @@ public class ResilientEmbeddingModel {
                     "The embedding provider is currently unavailable and requests are being "
                             + "rejected while it recovers. Try again shortly.", e, true);
         } catch (RuntimeException e) {
+            // The provider's own error is otherwise invisible: the retry
+            // swallows every intermediate attempt and only the last exception
+            // escapes, so without this line "provider unavailable" is all you
+            // ever see and you cannot tell a bad key from a network outage.
+            log.warn("Embedding call failed: {}", ModelErrors.describe(e));
+            if (ModelErrors.isClientError(e)) {
+                // Not retried, does not count toward the breaker. Telling the
+                // caller to "try again shortly" here would be a lie.
+                throw new ModelUnavailableException(
+                        ModelErrors.clientErrorAdvice("embedding"), e, false);
+            }
             throw new ModelUnavailableException(
                     "The embedding provider could not be reached after %d attempts."
                             .formatted(retry.getRetryConfig().getMaxAttempts()), e, false);

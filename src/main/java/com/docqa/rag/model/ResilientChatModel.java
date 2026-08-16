@@ -95,6 +95,10 @@ public class ResilientChatModel {
                     "The language model provider is currently unavailable and requests are being "
                             + "rejected while it recovers. Try again shortly.", e, true);
         } catch (RuntimeException e) {
+            if (ModelErrors.isClientError(e)) {
+                throw new ModelUnavailableException(
+                        ModelErrors.clientErrorAdvice("language model"), e, false);
+            }
             throw new ModelUnavailableException(
                     "The language model provider could not be reached after %d attempts."
                             .formatted(retry.getRetryConfig().getMaxAttempts()), e, false);

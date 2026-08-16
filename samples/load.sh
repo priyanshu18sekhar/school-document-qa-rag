@@ -15,9 +15,11 @@ TENANT="${1:-greenwood}"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Writes progress to stderr and the document id to stdout, so that
+# `id=$(upload ...)` captures the id and nothing else.
 upload() {
     local file="$1" category="$2" title="$3"
-    printf '  %-24s %-12s ' "$(basename "$file")" "$category"
+    printf '  %-24s %-12s ' "$(basename "$file")" "$category" >&2
 
     local response
     response=$(curl -sS -X POST "$BASE_URL/api/v1/documents" \
@@ -29,10 +31,11 @@ upload() {
     local id
     id=$(printf '%s' "$response" | sed -n 's/.*"documentId":"\([^"]*\)".*/\1/p')
     if [ -z "$id" ]; then
-        echo "FAILED"
-        printf '    %s\n' "$response"
+        echo "REJECTED" >&2
+        printf '    %s\n' "$response" >&2
         return 1
     fi
+    echo "queued" >&2
     echo "$id"
 }
 

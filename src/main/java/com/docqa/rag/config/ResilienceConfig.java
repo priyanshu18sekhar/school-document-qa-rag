@@ -9,6 +9,7 @@ import io.github.resilience4j.micrometer.tagged.TaggedRetryMetrics;
 import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
+import com.docqa.rag.model.ModelErrors;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,6 +67,10 @@ public class ResilienceConfig {
                 .waitDurationInOpenState(Duration.ofSeconds(cfg.waitDurationInOpenStateSeconds()))
                 .permittedNumberOfCallsInHalfOpenState(cfg.permittedCallsInHalfOpenState())
                 .automaticTransitionFromOpenToHalfOpenEnabled(true)
+                // A request the provider refused (bad key, unknown model) is not
+                // evidence that the provider is unhealthy. Counting it would let
+                // a missing API key open the circuit and report the provider DOWN.
+                .ignoreException(ModelErrors::isClientError)
                 .build();
 
         CircuitBreakerRegistry registry = CircuitBreakerRegistry.of(config);
@@ -99,8 +104,11 @@ public class ResilienceConfig {
                                 0.5,
                                 Duration.ofMillis(cfg.maxBackoffMs())))
                 // Retrying a call the breaker already rejected defeats the
-                // breaker: it would turn one fail-fast into N sleeps.
+                // breaker: it would turn one fail-fast into N sleeps. And a
+                // request the provider refused fails identically every time -
+                // retrying a 401 spends 8s of backoff to learn nothing.
                 .ignoreExceptions(CallNotPermittedException.class)
+                .retryOnException(error -> !ModelErrors.isClientError(error))
                 .failAfterMaxAttempts(true)
                 .build();
 
